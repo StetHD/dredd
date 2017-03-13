@@ -530,7 +530,7 @@ class TransactionRunner
 
     handleRequest = (err, res, body) =>
       if err
-        logger.debug('Requesting tested server errored:', err)
+        logger.debug('Requesting tested server errored:', "#{err}" or err.code)
         test.title = transaction.id
         test.expected = transaction.expected
         test.request = transaction.request

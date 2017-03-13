@@ -12,6 +12,7 @@ handleRuntimeProblems = require './handle-runtime-problems'
 dreddTransactions = require 'dredd-transactions'
 configureReporters = require './configure-reporters'
 
+PROXY_ENV_VARIABLES = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY']
 CONNECTION_ERRORS = ['ECONNRESET', 'ENOTFOUND', 'ESOCKETTIMEDOUT', 'ETIMEDOUT', 'ECONNREFUSED', 'EHOSTUNREACH', 'EPIPE']
 
 removeDuplicates = (arr) ->
@@ -41,6 +42,24 @@ class Dredd
     @transactions = []
     @runner = new Runner(@configuration)
     configureReporters(@configuration, @stats, @tests, @runner)
+    @logProxySettings()
+
+  # TODO unit tests
+  logProxySettings: ->
+    proxySettings = []
+
+    for envVariable in Object.keys(process.env)
+      continue unless envVariable.toUpperCase() in PROXY_ENV_VARIABLES
+      continue unless process.env[envVariable] isnt ''
+      proxySettings.push("#{envVariable}=#{process.env[envVariable]}")
+
+    if proxySettings.length
+      logger.verbose("""\
+        Using HTTP(S) proxy specified by environment variables: \
+        #{proxySettings.join(' ')}\
+      """)
+    else
+      logger.verbose('Using no HTTP(S) proxy')
 
   run: (callback) ->
     @configDataIsEmpty = true
@@ -139,6 +158,7 @@ class Dredd
       json: false
     , (downloadError, res, body) =>
       if downloadError
+        logger.debug("Downloading #{fileUrl} errored:", "#{downloadError}" or downloadError.code)
         err = new Error("""\
           Error when loading file from URL '#{fileUrl}'. \
           Is the provided URL correct?\
