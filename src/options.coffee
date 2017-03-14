@@ -167,4 +167,10 @@ options =
     description: 'Path to dredd.yml config file.'
     default: './dredd.yml'
 
+  proxy:
+    description: '''\
+      HTTP(S) proxy settings. Overrides http_proxy, HTTP_PROXY, https_proxy, \
+      and HTTPS_PROXY environment variables.
+    '''
+
 module.exports = options

@@ -209,8 +209,6 @@ class ApiaryReporter
       'User-Agent': "Dredd Apiary Reporter/#{packageData.version} (#{system})"
       'Content-Type': 'application/json'
       'Content-Length': Buffer.byteLength(body, 'utf8')
-    if @configuration.apiToken
-      options.headers['Authentication'] = 'Token ' + @configuration.apiToken
 
     options = {
       uri: @configuration.apiUrl + path
@@ -218,6 +216,11 @@ class ApiaryReporter
       headers
       body
     }
+    if @configuration.apiToken
+      options.headers['Authentication'] = 'Token ' + @configuration.apiToken
+    if @config.options.proxy
+      options.proxy = @config.options.proxy
+
     try
       protocol = options.uri.split(':')[0].toUpperCase()
       logger.verbose("""\

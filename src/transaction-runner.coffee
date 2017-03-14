@@ -442,12 +442,16 @@ class TransactionRunner
       hostname: transaction.host
       port: transaction.port
 
-    return {
+    options =
       uri: url.format(urlObject) + transaction.fullPath
       method: transaction.request.method
       headers: transaction.request.headers
       body: transaction.request.body
-    }
+
+    if @configuration.options.proxy
+      options.proxy = @configuration.options.proxy
+
+    return options
 
   # Add length of body if no Content-Length present
   setContentLength: (transaction) ->

@@ -47,19 +47,20 @@ class Dredd
   # TODO unit tests
   logProxySettings: ->
     proxySettings = []
-
     for envVariable in Object.keys(process.env)
       continue unless envVariable.toUpperCase() in PROXY_ENV_VARIABLES
       continue unless process.env[envVariable] isnt ''
       proxySettings.push("#{envVariable}=#{process.env[envVariable]}")
 
-    if proxySettings.length
-      logger.verbose("""\
-        Using HTTP(S) proxy specified by environment variables: \
-        #{proxySettings.join(' ')}\
-      """)
-    else
-      logger.verbose('Using no HTTP(S) proxy')
+    if @configuration.options.proxy
+      message = "HTTP(S) proxy specified by Dredd options: #{@configuration.options.proxy}"
+      if proxySettings.length
+        message += " (overrides environment variables: #{proxySettings.join(' ')})"
+      logger.verbose(message)
+
+    else if proxySettings.length
+      message = "HTTP(S) proxy specified by environment variables: #{proxySettings.join(' ')}"
+      logger.verbose(message)
 
   run: (callback) ->
     @configDataIsEmpty = true
@@ -152,11 +153,10 @@ class Dredd
     , callback
 
   downloadFile: (fileUrl, callback) ->
-    request.get
-      url: fileUrl
-      timeout: 5000
-      json: false
-    , (downloadError, res, body) =>
+    options = {url: fileUrl, timeout: 5000, json: false}
+    options.proxy = @configuration.options.proxy if @configuration.options.proxy
+
+    request.get options, (downloadError, res, body) =>
       if downloadError
         logger.debug("Downloading #{fileUrl} errored:", "#{downloadError}" or downloadError.code)
         err = new Error("""\
