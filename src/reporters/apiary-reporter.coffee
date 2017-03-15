@@ -218,7 +218,7 @@ class ApiaryReporter
     }
     if @configuration.apiToken
       options.headers['Authentication'] = 'Token ' + @configuration.apiToken
-    if @config.options.proxy
+    if @config?.options?.proxy
       options.proxy = @config.options.proxy
 
     try
