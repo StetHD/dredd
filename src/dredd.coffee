@@ -55,11 +55,11 @@ class Dredd
     if @configuration.options.proxy
       message = "HTTP(S) proxy specified by Dredd options: #{@configuration.options.proxy}"
       if proxySettings.length
-        message += " (overrides environment variables: #{proxySettings.join(' ')})"
+        message += " (overrides environment variables: #{proxySettings.join(', ')})"
       logger.verbose(message)
 
     else if proxySettings.length
-      message = "HTTP(S) proxy specified by environment variables: #{proxySettings.join(' ')}"
+      message = "HTTP(S) proxy specified by environment variables: #{proxySettings.join(', ')}"
       logger.verbose(message)
 
   run: (callback) ->
