@@ -3,22 +3,16 @@ url = require('url')
 clone = require('clone')
 {assert} = require('chai')
 
-{runDredd, recordLogging, DEFAULT_SERVER_PORT} = require('./helpers')
+{runDredd, recordLogging, createServer, DEFAULT_SERVER_PORT} = require('./helpers')
 logger = require('../../src/logger')
 Dredd = require('../../src/dredd')
 
 
 PROXY_PORT = DEFAULT_SERVER_PORT + 1
 PROXY_URL = "http://127.0.0.1:#{PROXY_PORT}"
-DIFFERENT_PROXY_URL = 'http://proxy.example.com'
-
-SERVER_URL_HTTP = 'http://tested-api.example.com'
-APIARY_API_URL_HTTP = 'http://apiary-api.example.com'
-REMOTE_API_DESCRIPTION_URL_HTTP = 'http://static.example.com/example.apib'
-
-SERVER_URL_HTTPS = 'https://tested-api.example.com'
-APIARY_API_URL_HTTPS = 'https://apiary-api.example.com'
-REMOTE_API_DESCRIPTION_URL_HTTPS = 'https://static.example.com/example.apib'
+SERVER_HOST = "127.0.0.1:#{DEFAULT_SERVER_PORT}"
+DUMMY_URL = 'http://example.com'
+REGULAR_HTTP_METHODS = ['GET', 'POST', 'PUT', 'DELETE']
 
 
 # Normally, tests create Dredd instance and pass it to the 'runDredd'
@@ -28,7 +22,7 @@ createAndRunDredd = (configuration, done) ->
   configuration.options ?= {}
   configuration.options.color = false
   configuration.options.silent = true
-  configuration.options.level = 'debug'
+  configuration.options.level = 'silly'
 
   dredd = undefined
   recordLogging((next) ->
@@ -36,272 +30,451 @@ createAndRunDredd = (configuration, done) ->
     next()
   , (err, args, dreddInitLogging) ->
     runDredd(dredd, (err, info) ->
-      info.dreddInitLogging = dreddInitLogging if info
+      info.logging = dreddInitLogging
       done(err, info)
     )
   )
 
 
-scenarios = [
-    name: 'When Set by Environment Variables'
-    init: (protocol, configuration) ->
-      beforeEach( -> process.env["#{protocol}_proxy"] = PROXY_URL)
-      afterEach( -> delete process.env["#{protocol}_proxy"])
-    expectedLog: new RegExp("""\
-      proxy specified by environment variables: \
-      https?_proxy=#{PROXY_URL}\
-    """)
-  ,
-    name: 'When Set by dredd.yml (or CLI)'
-    init: (protocol, configuration) ->
-      configuration.options.proxy = PROXY_URL
-    expectedLog: new RegExp("proxy specified by Dredd options: #{PROXY_URL}")
-  ,
-    name: 'When Set by Environment Variables and overriden by dredd.yml (or CLI)'
-    init: (protocol, configuration) ->
-      beforeEach( -> process.env["#{protocol}_proxy"] = DIFFERENT_PROXY_URL)
-      afterEach( -> delete process.env["#{protocol}_proxy"])
-      configuration.options.proxy = PROXY_URL
-    expectedLog: new RegExp("""\
-      proxy specified by Dredd options: #{PROXY_URL} \
-      \\(overrides environment variables: https?_proxy=#{DIFFERENT_PROXY_URL}\\)\
-    """)
-]
-
-
-describe('Respecting HTTP Proxy Settings', ->
-  proxy = undefined
-  proxyReq = undefined
-
-  beforeEach((done) ->
-    server = http.createServer()
-
-    proxyReq = {}
-    server.on('request', (req, res) ->
-      proxyReq.url = req.url
-      proxyReq.method = req.method
+# Creates dummy proxy server for given protocol. Records details
+# about the first received request to the object given as a second
+# argument.
+createProxyServer = (protocol, proxyRequestInfo) ->
+  app = http.createServer()
+  if protocol is 'http'
+    app.on('request', (req, res) ->
+      proxyRequestInfo.url = req.url
+      proxyRequestInfo.method = req.method
 
       res.writeHead(200, {'Content-Type': 'text/plain'})
       res.end('OK')
     )
+  else if protocol is 'https'
+    # Uses the 'http' module as well, because otherwise we would
+    # need to grapple with certificates in the test. Using 'http'
+    # for running the proxy doesn't affect anything. The important
+    # difference is whether the URLs requested by Dredd start with
+    # 'http://' or 'https://'.
+    #
+    # See https://en.wikipedia.org/wiki/HTTP_tunnel#HTTP_CONNECT_tunneling
+    # and https://github.com/request/request#proxies
+    app.on('connect', (req, socket) ->
+      proxyRequestInfo.url = req.url
+      proxyRequestInfo.method = req.method
 
-    proxy = server.listen(PROXY_PORT, done)
+      socket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+      socket.end()
+    )
+  else
+    throw new Error("Unsupported protocol: #{protocol}")
+  return app
+
+
+# Runs a single scenario. Options:
+#
+# - protocol (enum)
+#     - http
+#     - https
+# - configureDredd (function) - Gets object with Dredd config
+# - expectedLog (string) - String to be expected in Dredd's output
+# - expectedDestination (enum) - Which destination is Dredd expected to hit
+#     - proxy - Means Dredd is expected to hit proxy
+#     - server - Means Dredd is expected to hit the dummy server
+# - expectedUrl (string) - Which URL is Dredd expected to request
+test = (scenario) ->
+  # Setup and prepare dummy proxy
+  proxy = undefined
+  proxyRequestInfo = {}
+
+  beforeEach((done) ->
+    app = createProxyServer(scenario.protocol, proxyRequestInfo)
+    proxy = app.listen(PROXY_PORT, done)
   )
   afterEach((done) ->
-    proxyReq = undefined
     proxy.close(done)
   )
 
+  # Setup and prepare dummy server
+  server = undefined
+  serverRuntimeInfo = undefined
 
-  scenarios.forEach((scenario) ->
-    describe(scenario.name, ->
-      configuration = {server: SERVER_URL_HTTP, options: {}}
-      scenario.init('http', configuration)
+  beforeEach((done) ->
+    app = createServer()
+    server = app.listen(DEFAULT_SERVER_PORT, (err, info) ->
+      serverRuntimeInfo = info
+      done(err)
+    )
+  )
+  afterEach((done) ->
+    serverRuntimeInfo = undefined
+    server.close(done)
+  )
+
+  # Setup and run Dredd
+  dreddLogging = undefined
+
+  beforeEach((done) ->
+    configuration = {options: {}}
+    scenario.configureDredd(configuration)
+
+    createAndRunDredd(configuration, (err, info) ->
+      return done(err) if err
+      dreddLogging = info.logging
+      done()
+    )
+  )
+
+  # Assertions...
+  it('logs the proxy settings', ->
+    assert.include(dreddLogging, scenario.expectedLog)
+  )
+
+  if scenario.expectedDestination is 'proxy'
+    it('does not request the server', ->
+      assert.isFalse(serverRuntimeInfo.requested)
+    )
+    it('does request the proxy', ->
+      assert.notDeepEqual(proxyRequestInfo, {})
+    )
+
+    if scenario.protocol is 'http'
+      it('requests the proxy with regular HTTP method', ->
+        assert.oneOf(proxyRequestInfo.method, REGULAR_HTTP_METHODS)
+      )
+      it('requests the proxy, using the original URL as a path', ->
+        assert.equal(proxyRequestInfo.url, scenario.expectedUrl)
+      )
+    else if scenario.protocol is 'https'
+      it('requests the proxy with CONNECT', ->
+        assert.equal(proxyRequestInfo.method, 'CONNECT')
+      )
+      it('asks the proxy to tunnel SSL connection to the original hostname', ->
+        hostname = "#{url.parse(scenario.expectedUrl).hostname}:#{DEFAULT_SERVER_PORT}"
+        assert.equal(proxyRequestInfo.url, hostname)
+      )
+    else
+      throw new Error("Unsupported protocol: #{scenario.protocol}")
+
+  else if scenario.expectedDestination is 'server'
+    it('does not request the proxy', ->
+      assert.deepEqual(proxyRequestInfo, {})
+    )
+    it('does request the server', ->
+      assert.isTrue(serverRuntimeInfo.requestedOnce)
+    )
+
+    it('requests the server with regular HTTP method', ->
+      assert.oneOf(serverRuntimeInfo.lastRequest.method, REGULAR_HTTP_METHODS)
+    )
+    it('requests the server with the original path', ->
+      assert.equal(serverRuntimeInfo.lastRequest.url, url.parse(scenario.expectedUrl).path)
+    )
+
+  else
+    throw new Error("Unsupported destination: #{scenario.expectedDestination}")
+
+
+['http', 'https'].forEach((protocol) ->
+  serverUrl = "#{protocol}://#{SERVER_HOST}"
+
+  describe("Respecting #{protocol.toUpperCase()} Proxy Settings", ->
+    describe('When Set by Environment Variables', ->
+      expectedLog = """\
+        proxy specified by environment variables: \
+        #{protocol}_proxy=#{PROXY_URL}\
+      """
+
+      beforeEach( ->
+        process.env["#{protocol}_proxy"] = PROXY_URL
+      )
+      afterEach( ->
+        delete process.env["#{protocol}_proxy"]
+      )
 
       describe('Requesting Server Under Test', ->
-        dreddInitLogging = undefined
-
-        beforeEach((done) ->
-          config = clone(configuration)
-          config.options.path = './test/fixtures/single-get.apib'
-
-          createAndRunDredd(config, (err, info) ->
-            return done(err) if err
-            dreddInitLogging = info.dreddInitLogging
-            done()
-          )
-        )
-
-        it('logs the proxy settings', ->
-          assert.match(dreddInitLogging, scenario.expectedLog)
-        )
-        it('requests the proxy, using the original server URL as a path', ->
-          assert.equal(proxyReq.method, 'GET')
-          assert.equal(proxyReq.url, "#{SERVER_URL_HTTP}/machines")
-        )
+        test({
+          protocol
+          configureDredd: (configuration) ->
+            configuration.server = serverUrl
+            configuration.options.path = './test/fixtures/single-get.apib'
+          expectedLog
+          expectedDestination: 'proxy'
+          expectedUrl: serverUrl + '/machines'
+        })
       )
 
       describe('Using Apiary Reporter', ->
-        dreddInitLogging = undefined
-
-        beforeEach((done) ->
-          process.env.APIARY_API_URL = APIARY_API_URL_HTTP
-
-          config = clone(configuration)
-          config.options.path = './test/fixtures/single-get.apib'
-          config.options.reporter = ['apiary']
-
-          createAndRunDredd(config, (err, info) ->
-            return done(err) if err
-            dreddInitLogging = info.dreddInitLogging
-            done()
-          )
+        beforeEach( ->
+          process.env.APIARY_API_URL = serverUrl
         )
         afterEach( ->
           delete process.env.APIARY_API_URL
         )
 
-        it('logs the proxy settings', ->
-          assert.match(dreddInitLogging, scenario.expectedLog)
-        )
-        it('requests the proxy, using the original Apiary reporter API URL as a path', ->
-          assert.equal(proxyReq.method, 'POST')
-          assert.equal(proxyReq.url, "#{APIARY_API_URL_HTTP}/apis/public/tests/runs")
-        )
+        test({
+          protocol
+          configureDredd: (configuration) ->
+            configuration.server = DUMMY_URL
+            configuration.options.path = './test/fixtures/single-get.apib'
+            configuration.options.reporter = ['apiary']
+          expectedLog
+          expectedDestination: 'proxy'
+          expectedUrl: serverUrl + '/apis/public/tests/runs'
+        })
       )
 
       describe('Downloading API Description Document', ->
-        dreddInitLogging = undefined
+        test({
+          protocol
+          configureDredd: (configuration) ->
+            configuration.server = DUMMY_URL
+            configuration.options.path = serverUrl + '/example.apib'
+          expectedLog
+          expectedDestination: 'proxy'
+          expectedUrl: serverUrl + '/example.apib'
+        })
+      )
+    )
 
-        beforeEach((done) ->
-          config = clone(configuration)
-          config.options.path = REMOTE_API_DESCRIPTION_URL_HTTP
+    describe('When Set by Dredd Option', ->
+      expectedLog = "proxy specified by Dredd options: #{PROXY_URL}"
 
-          createAndRunDredd(config, (err, info) ->
-            return done(err) if err
-            dreddInitLogging = info.dreddInitLogging
-            done()
-          )
+      describe('Requesting Server Under Test', ->
+        test({
+          protocol
+          configureDredd: (configuration) ->
+            configuration.server = serverUrl
+            configuration.options.path = './test/fixtures/single-get.apib'
+            configuration.options.proxy = PROXY_URL
+          expectedLog
+          expectedDestination: 'proxy'
+          expectedUrl: serverUrl + '/machines'
+        })
+      )
+
+      describe('Using Apiary Reporter', ->
+        beforeEach( ->
+          process.env.APIARY_API_URL = serverUrl
+        )
+        afterEach( ->
+          delete process.env.APIARY_API_URL
         )
 
-        it('logs the proxy settings', ->
-          assert.match(dreddInitLogging, scenario.expectedLog)
+        test({
+          protocol
+          configureDredd: (configuration) ->
+            configuration.server = DUMMY_URL
+            configuration.options.path = './test/fixtures/single-get.apib'
+            configuration.options.proxy = PROXY_URL
+            configuration.options.reporter = ['apiary']
+          expectedLog
+          expectedDestination: 'proxy'
+          expectedUrl: serverUrl + '/apis/public/tests/runs'
+        })
+      )
+
+      describe('Downloading API Description Document', ->
+        test({
+          protocol
+          configureDredd: (configuration) ->
+            configuration.server = DUMMY_URL
+            configuration.options.path = serverUrl + '/example.apib'
+            configuration.options.proxy = PROXY_URL
+          expectedLog
+          expectedDestination: 'proxy'
+          expectedUrl: serverUrl + '/example.apib'
+        })
+      )
+    )
+
+    describe('When Set by Environment Variables and Overriden by Dredd Option', ->
+      expectedLog = """\
+        proxy specified by Dredd options: #{PROXY_URL} \
+        (overrides environment variables: #{protocol}_proxy=#{DUMMY_URL})\
+      """
+
+      beforeEach( ->
+        process.env["#{protocol}_proxy"] = DUMMY_URL
+      )
+      afterEach( ->
+        delete process.env["#{protocol}_proxy"]
+      )
+
+      describe('Requesting Server Under Test', ->
+        test({
+          protocol
+          configureDredd: (configuration) ->
+            configuration.server = serverUrl
+            configuration.options.path = './test/fixtures/single-get.apib'
+            configuration.options.proxy = PROXY_URL
+          expectedLog
+          expectedDestination: 'proxy'
+          expectedUrl: serverUrl + '/machines'
+        })
+      )
+
+      describe('Using Apiary Reporter', ->
+        beforeEach( ->
+          process.env.APIARY_API_URL = serverUrl
         )
-        it('requests the proxy, using the original API description URL as a path', ->
-          assert.equal(proxyReq.method, 'GET')
-          assert.equal(proxyReq.url, REMOTE_API_DESCRIPTION_URL_HTTP)
+        afterEach( ->
+          delete process.env.APIARY_API_URL
         )
+
+        test({
+          protocol
+          configureDredd: (configuration) ->
+            configuration.server = DUMMY_URL
+            configuration.options.path = './test/fixtures/single-get.apib'
+            configuration.options.proxy = PROXY_URL
+            configuration.options.reporter = ['apiary']
+          expectedLog
+          expectedDestination: 'proxy'
+          expectedUrl: serverUrl + '/apis/public/tests/runs'
+        })
+      )
+
+      describe('Downloading API Description Document', ->
+        test({
+          protocol
+          configureDredd: (configuration) ->
+            configuration.server = DUMMY_URL
+            configuration.options.path = serverUrl + '/example.apib'
+            configuration.options.proxy = PROXY_URL
+          expectedLog
+          expectedDestination: 'proxy'
+          expectedUrl: serverUrl + '/example.apib'
+        })
       )
     )
   )
 )
 
 
-describe('Respecting HTTPS Proxy Settings', ->
-  proxy = undefined
-  proxyReq = undefined
+describe("Respecting ‘no_proxy’ Environment Variable", ->
+  serverUrl = "http://#{SERVER_HOST}"
 
-  beforeEach((done) ->
-    # Uses the 'http' module, because otherwise we would need to grapple
-    # with certificates in the test. Using 'http' for running the proxy
-    # doesn't affect anything. The important difference is whether the
-    # URLs requested by Dredd start with 'http://' or 'https://'.
-    #
-    # See https://en.wikipedia.org/wiki/HTTP_tunnel#HTTP_CONNECT_tunneling
-    # and https://github.com/request/request#proxies
-    server = http.createServer()
+  describe('When Set', ->
+    expectedLog = """\
+      proxy specified by environment variables: \
+      http_proxy=#{PROXY_URL}, no_proxy=#{SERVER_HOST}
+    """
 
-    proxyReq = {}
-    server.on('connect', (req, socket) ->
-      proxyReq.url = req.url
-      proxyReq.method = req.method
-
-      socket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
-      socket.end()
+    beforeEach( ->
+      process.env.http_proxy = PROXY_URL
+      process.env.no_proxy = SERVER_HOST
+    )
+    afterEach( ->
+      delete process.env.http_proxy
+      delete process.env.no_proxy
     )
 
-    proxy = server.listen(PROXY_PORT, done)
+    describe('Requesting Server Under Test', ->
+      test({
+        protocol: 'http'
+        configureDredd: (configuration) ->
+          configuration.server = serverUrl
+          configuration.options.path = './test/fixtures/single-get.apib'
+        expectedLog
+        expectedDestination: 'server'
+        expectedUrl: serverUrl + '/machines'
+      })
+    )
+
+    describe('Using Apiary Reporter', ->
+      beforeEach( ->
+        process.env.APIARY_API_URL = serverUrl
+      )
+      afterEach( ->
+        delete process.env.APIARY_API_URL
+      )
+
+      test({
+        protocol: 'http'
+        configureDredd: (configuration) ->
+          configuration.server = DUMMY_URL
+          configuration.options.path = './test/fixtures/single-get.apib'
+          configuration.options.reporter = ['apiary']
+        expectedLog
+        expectedDestination: 'server'
+        expectedUrl: serverUrl + '/apis/public/tests/runs'
+      })
+    )
+
+    describe('Downloading API Description Document', ->
+      test({
+        protocol: 'http'
+        configureDredd: (configuration) ->
+          configuration.server = DUMMY_URL
+          configuration.options.path = serverUrl + '/example.apib'
+        expectedLog
+        expectedDestination: 'server'
+        expectedUrl: serverUrl + '/example.apib'
+      })
+    )
   )
-  afterEach((done) ->
-    proxyReq = undefined
-    proxy.close(done)
-  )
 
+  describe('When Overridden by Dredd Option', ->
+    expectedLog = """\
+      proxy specified by Dredd options: #{PROXY_URL} \
+      (overrides environment variables: \
+      http_proxy=#{DUMMY_URL}, no_proxy=#{SERVER_HOST})\
+    """
 
-  scenarios.forEach((scenario) ->
-    describe(scenario.name, ->
-      configuration = {server: SERVER_URL_HTTPS, options: {}}
-      scenario.init('https', configuration)
+    beforeEach( ->
+      process.env.http_proxy = DUMMY_URL
+      process.env.no_proxy = SERVER_HOST
+    )
+    afterEach( ->
+      delete process.env.http_proxy
+      delete process.env.no_proxy
+    )
 
-      describe('Requesting Server Under Test', ->
-        dreddInitLogging = undefined
+    describe('Requesting Server Under Test', ->
+      test({
+        protocol: 'http'
+        configureDredd: (configuration) ->
+          configuration.server = serverUrl
+          configuration.options.proxy = PROXY_URL
+          configuration.options.path = './test/fixtures/single-get.apib'
+        expectedLog
+        expectedDestination: 'proxy'
+        expectedUrl: serverUrl + '/machines'
+      })
+    )
 
-        beforeEach((done) ->
-          config = clone(configuration)
-          config.options.path = './test/fixtures/single-get.apib'
-
-          createAndRunDredd(config, (err, info) ->
-            return done(err) if err
-            dreddInitLogging = info.dreddInitLogging
-            done()
-          )
-        )
-
-        it('logs the proxy settings', ->
-          assert.match(dreddInitLogging, scenario.expectedLog)
-        )
-        it('requests the proxy server with CONNECT', ->
-          assert.equal(proxyReq.method, 'CONNECT')
-        )
-        it('asks the proxy to tunnel SSL connection to the original hostname', ->
-          assert.equal(
-            proxyReq.url,
-            "#{url.parse(SERVER_URL_HTTP).hostname}:443"
-          )
-        )
+    describe('Using Apiary Reporter', ->
+      beforeEach( ->
+        process.env.APIARY_API_URL = serverUrl
+      )
+      afterEach( ->
+        delete process.env.APIARY_API_URL
       )
 
-      describe('Using Apiary Reporter', ->
-        dreddInitLogging = undefined
+      test({
+        protocol: 'http'
+        configureDredd: (configuration) ->
+          configuration.server = DUMMY_URL
+          configuration.options.path = './test/fixtures/single-get.apib'
+          configuration.options.proxy = PROXY_URL
+          configuration.options.reporter = ['apiary']
+        expectedLog
+        expectedDestination: 'proxy'
+        expectedUrl: serverUrl + '/apis/public/tests/runs'
+      })
+    )
 
-        beforeEach((done) ->
-          process.env.APIARY_API_URL = APIARY_API_URL_HTTPS
-
-          config = clone(configuration)
-          config.options.path = './test/fixtures/single-get.apib'
-          config.options.reporter = ['apiary']
-
-          createAndRunDredd(config, (err, info) ->
-            return done(err) if err
-            dreddInitLogging = info.dreddInitLogging
-            done()
-          )
-        )
-        afterEach( ->
-          delete process.env.APIARY_API_URL
-        )
-
-        it('logs the proxy settings', ->
-          assert.match(dreddInitLogging, scenario.expectedLog)
-        )
-        it('requests the proxy server with CONNECT', ->
-          assert.equal(proxyReq.method, 'CONNECT')
-        )
-        it('asks the proxy to tunnel SSL connection to the original hostname', ->
-          assert.equal(
-            proxyReq.url,
-            "#{url.parse(APIARY_API_URL_HTTPS).hostname}:443"
-          )
-        )
-      )
-
-      describe('Downloading API Description Document', ->
-        dreddInitLogging = undefined
-
-        beforeEach((done) ->
-          config = clone(configuration)
-          config.options.path = REMOTE_API_DESCRIPTION_URL_HTTPS
-
-          createAndRunDredd(config, (err, info) ->
-            return done(err) if err
-            dreddInitLogging = info.dreddInitLogging
-            done()
-          )
-        )
-
-        it('logs the proxy settings', ->
-          assert.match(dreddInitLogging, scenario.expectedLog)
-        )
-        it('requests the proxy server with CONNECT', ->
-          assert.equal(proxyReq.method, 'CONNECT')
-        )
-        it('asks the proxy to tunnel SSL connection to the original hostname', ->
-          assert.equal(
-            proxyReq.url,
-            "#{url.parse(REMOTE_API_DESCRIPTION_URL_HTTPS).hostname}:443"
-          )
-        )
-      )
+    describe('Downloading API Description Document', ->
+      test({
+        protocol: 'http'
+        configureDredd: (configuration) ->
+          configuration.server = DUMMY_URL
+          configuration.options.path = serverUrl + '/example.apib'
+          configuration.options.proxy = PROXY_URL
+        expectedLog
+        expectedDestination: 'proxy'
+        expectedUrl: serverUrl + '/example.apib'
+      })
     )
   )
 )
