@@ -170,7 +170,7 @@ Additional API description paths or URLs. Can be used multiple times with glob p
 **Default value:** `[]`
 
 ### --proxy
-HTTP(S) proxy settings. Overrides http_proxy, HTTP_PROXY, https_proxy, and HTTPS_PROXY environment variables.<br>
+HTTP(S) proxy settings. Overrides http_proxy, HTTP_PROXY, https_proxy, HTTPS_PROXY, no_proxy, and NO_PROXY environment variables.<br>
 
 ### --reporter, -r
 Output additional report format. This option can be used multiple times to add multiple reporters. Options: junit, nyan, dot, markdown, html, apiary.<br>
