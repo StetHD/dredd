@@ -44,7 +44,6 @@ class Dredd
     configureReporters(@configuration, @stats, @tests, @runner)
     @logProxySettings()
 
-  # TODO unit tests
   logProxySettings: ->
     proxySettings = []
     for envVariable in Object.keys(process.env)
